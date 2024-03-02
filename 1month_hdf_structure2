@@ -67,7 +67,7 @@ fi
 process_month() {
     year=$1
     month=$(printf "%02d" $((10#$2)))
-    hdf5_file="/work/pa24/kpanag/output/${year}${month}.h5"
+    hdf5_file="/work/pa24/kpanag/test_output/${year}${month}_v2.h5"
     SAS_FILES=()  # Initialize SAS_FILES array for the month
     declare -A SAS_FILES_GROUP
     declare -A SAS_FILES_TYPE
