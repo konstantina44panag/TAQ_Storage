@@ -11,13 +11,16 @@
 #SBATCH --job-name=process_sas_file    # Job name
 #SBATCH --output=process_sas_file.%j.out # Stdout (%j expands to jobId)
 #SBATCH --error=process_sas_file.%j.err # Stderr (%j expands to jobId)
+#SBATCH --ntasks=204                    # Total number of tasks
+#SBATCH --nodes=11                      # Number of nodes requested
 #SBATCH --ntasks-per-node=20           # Tasks per node
 #SBATCH --cpus-per-task=1             # Threads per task
-#SBATCH --time=500:00:00               # walltime
-#SBATCH --mem=60G                     # memory per NODE
+#SBATCH --time=48:00:00                 # Walltime
+#SBATCH --mem=56G                     # memory per NODE
 #SBATCH --partition=compute           # Partition
 #SBATCH --account=pa240201              # Replace with your system project
 #SBATCH --array=1-204                  # Submit 12 tasks, one for each month
+
 
 # Set up the environment
 if [ -z "${SLURM_CPUS_PER_TASK+x}" ]; then
@@ -49,7 +52,7 @@ let "month_index = ($SLURM_ARRAY_TASK_ID - 1) % 12 + 1"
 YEAR=$(($year_index + 2007))
 MONTH=$(printf "%02d" $month_index)
 
-srun bash /work/pa24/kpanag/scripts/csv_hdf.sh $YEAR $MONTH
+srun bash /work/pa24/kpanag/scripts/first_run/csv_hdf.sh $YEAR $MONTH
 ---------------------------------------------------------
 (myenv) [kpanag@login01 first_run]$ cat csv_hdf.sh
 #!/bin/bash
@@ -96,7 +99,7 @@ process_month() {
             gzip -dk "$SAS_FILE"
         fi
 
-        readstat "$BASE_NAME" - |python3.11 /work/pa24/kpanag/scripts/hdf_structure2.py "$hdf5_file" "$GROUP_NAME" "$TYPE_NAME"
+        readstat "$BASE_NAME" - |python3.11 /work/pa24/kpanag/scripts/first_run/hdf_structure2.py "$hdf5_file" "$GROUP_NAME" "$TYPE_NAME"
         echo "File $SAS_FILE has been processed and appended to $hdf5_file."
         rm "$BASE_NAME"
         rm "$SAS_FILE"
