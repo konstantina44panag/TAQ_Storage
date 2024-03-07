@@ -1,0 +1,173 @@
+(myenv) [kpanag@login02 first_run]$ cat first_run.slurm
+#!/bin/bash -l
+
+####################################
+#     SLURM Job Submission Script  #
+#                                  #
+# Submit script: sbatch submit_job.slurm #
+#                                  #
+####################################
+
+#SBATCH --job-name=process_sas_file    # Job name
+#SBATCH --output=process_sas_file.%j.out # Stdout (%j expands to jobId)
+#SBATCH --error=process_sas_file.%j.err # Stderr (%j expands to jobId)
+#SBATCH --nodes=1                      # Number of nodes requested
+#SBATCH --ntasks=1                     # One task per node for GNU Parallel
+#SBATCH --cpus-per-task=20              # Number of CPUs per task - align with node CPU count
+#SBATCH --time=48:00:00                 # Walltime
+#SBATCH --mem=56G                     # memory per NODE
+#SBATCH --partition=compute           # Partition
+#SBATCH --account=pa240201              # Replace with your system project
+
+
+# Set up the environment
+if [ -z "${SLURM_CPUS_PER_TASK+x}" ]; then
+    export OMP_NUM_THREADS=1
+else
+    export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+fi
+
+module purge
+module load gnu/9
+module load python/3.11.6
+module load intel/18
+module load intelmpi/2018
+module load hdf5/1.12.1/gnu
+module load cuda/10.1.168
+module load ucx/1.9.0
+
+export HDF5_DIR=/apps/libraries/hdf5/1.12.1/gnu
+export PATH=$HDF5_DIR/bin:$PATH
+export LD_LIBRARY_PATH=$HDF5_DIR/lib:$HDF5_DIR/lib64:$LD_LIBRARY_PATH
+export LIBRARY_PATH=$HDF5_DIR/lib:$HDF5_DIR/lib64:$LIBRARY_PATH
+export C_INCLUDE_PATH=$HDF5_DIR/include:$C_INCLUDE_PATH
+export CPLUS_INCLUDE_PATH=$HDF5_DIR/include:$CPLUS_INCLUDE_PATH
+export MPI_DIR=/apps/compilers/intel/18.0.4/impi/2018.4.274
+
+
+batch_file="/work/pa24/kpanag/scripts/first_run/batch_1_months_fixed.txt"
+process_row() {
+    year=$1
+    month=$2
+    bash /work/pa24/kpanag/scripts/first_run/csv_hdf.sh $year $month
+}
+
+# Export the function so that GNU Parallel can access it
+export -f process_row
+
+# Parallelize across 20 cores for each row in the text file
+cat "$batch_file" | parallel -j $SLURM_CPUS_PER_TASK process_row
+____________________________________________________________________________________________
+(myenv) [kpanag@login02 first_run]$ cat csv_hdf.sh
+#!/bin/bash
+set -eu
+
+export PATH=$PATH:/users/pa24/kpanag/.local/bin
+
+if [ -z "${LD_LIBRARY_PATH+x}" ]; then
+    export LD_LIBRARY_PATH=/users/pa24/kpanag/local/lib
+else
+    export LD_LIBRARY_PATH=/users/pa24/kpanag/local/lib:$LD_LIBRARY_PATH
+fi
+
+# Function to process a single month
+process_month() {
+    year=$1
+    month=$(printf "%02d" $((10#$2)))
+    hdf5_file="/work/pa24/kpanag/output/${year}${month}.h5"
+    SAS_FILES=()  # Initialize SAS_FILES array for the month
+    declare -A SAS_FILES_GROUP
+    declare -A SAS_FILES_TYPE
+    # Loop through the days of the month
+    for d in $(seq -f "%02g" 1 1 31); do
+        for type in ctm complete_nbbo; do
+            file_pattern="/work/pa24/kpanag/taq_msec${year}/m${year}${month}/${type}_${year}${month}${d}.sas7bdat.*"
+            for file_name in $file_pattern; do
+                if [ -e "$file_name" ]; then
+                    SAS_FILES+=("$file_name")
+                    SAS_FILES_GROUP["$file_name"]="${d}"
+                    SAS_FILES_TYPE["$file_name"]="$type"
+                fi
+            done
+        done
+    done
+
+    for SAS_FILE in "${SAS_FILES[@]}"; do
+        BASE_NAME="${SAS_FILE%.*}"
+        GROUP_NAME="day${SAS_FILES_GROUP["$SAS_FILE"]}"
+        TYPE_NAME="${SAS_FILES_TYPE["$SAS_FILE"]}"
+
+        if [[ $SAS_FILE == *.bz2 ]]; then
+            bzip2 -dk "$SAS_FILE"
+        elif [[ $SAS_FILE == *.gz ]]; then
+            gzip -dk "$SAS_FILE"
+        fi
+
+        readstat "$BASE_NAME" - |python3.11 /work/pa24/kpanag/scripts/first_run/hdf_structure2.py "$hdf5_file" "$GROUP_NAME" "$TYPE_NAME"
+        echo "File $SAS_FILE has been processed and appended to $hdf5_file."
+        rm "$BASE_NAME"
+        rm "$SAS_FILE"
+    done
+}
+
+process_month "$1" "$2"
+______________________________________________________________________________________________________________________________________________
+(myenv) [kpanag@login02 first_run]$ cat hdf_structure2.py
+#!/usr/bin/env python3.11
+import pandas as pd
+import argparse
+import sys
+import h5py
+
+def append_data_to_hdf5(hdf5_path, group_name, type_name, csv_input, chunksize=1000000):
+    reader = pd.read_csv(csv_input, chunksize=chunksize, low_memory=False, index_col=False)
+    unique_keys = set()
+    column_names = None
+    with pd.HDFStore(hdf5_path, mode='a', complevel=9, complib='zlib') as store:
+        for chunk in reader:
+            if column_names is None:
+                column_names = chunk.columns.tolist()
+            if 'SYM_SUFFIX' in chunk.columns:
+                chunk['SYM_SUFFIX'] = chunk['SYM_SUFFIX'].astype(str)
+            if 'TR_STOP_IND' in chunk.columns:
+                chunk['TR_STOP_IND'] = chunk['TR_STOP_IND'].astype(str)
+            if 'NATBBO_IND' in chunk.columns:
+                chunk['NATBBO_IND'] = chunk['NATBBO_IND'].astype(str)
+            if type_name == 'complete_nbbo':
+                index_position = 2
+            if type_name == 'ctm':
+                index_position = 3
+            if type_name == 'mastm':
+                index_position = 1
+            for unique_key, group_df in chunk.groupby(chunk.columns[index_position]):
+                hdf5_key = f'{unique_key.replace("/", "_").replace(" ", "_").replace("-", "_").replace(".", "_")}/{group_name}/{type_name}'
+                min_itemsize = {col: 8 for col in group_df.columns}
+                min_itemsize['TIME_M'] = 16
+                if 'PART_TIME' in group_df.columns:
+                    min_itemsize['PART_TIME'] = 16
+                store.append(hdf5_key, group_df, format='table', data_columns=True, index=False, min_itemsize=min_itemsize)
+                unique_keys.add(hdf5_key)
+
+    with h5py.File(hdf5_path, 'a') as hdf_file:
+        for hdf5_key in unique_keys:
+            if hdf5_key in hdf_file:
+                dset = hdf_file[hdf5_key]
+                dset.attrs['column_names'] = column_names
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Append CSV data to an HDF5 file, organized by unique values in the fourth column.")
+    parser.add_argument("hdf5_path", help="Path to the HDF5 file.")
+    parser.add_argument("group_name", help="Name of the group under which data should be stored.")
+    parser.add_argument("type_name", help="Type of the data (e.g., ctm, mastm..).")
+    parser.add_argument("csv_path", nargs='?', default=sys.stdin, help="Path to the input CSV file or '-' for stdin.")
+    args = parser.parse_args()
+
+    if args.csv_path is sys.stdin or args.csv_path == '-':
+        if sys.stdin.isatty():
+            print("Error: No data piped to script and no CSV file path provided.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            append_data_to_hdf5(args.hdf5_path, args.group_name, args.type_name, sys.stdin)
+    else:
+        append_data_to_hdf5(args.hdf5_path, args.group_name, args.type_name, args.csv_path)
